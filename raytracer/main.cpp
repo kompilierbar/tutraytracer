@@ -206,6 +206,11 @@ struct Sphere {
 	i32 material_index;
 };
 
+struct PointLight {
+	Vec3f position;
+	float intensity;
+};
+
 struct Scene {
 	Camera camera;
 
@@ -219,6 +224,9 @@ struct Scene {
 
 	i32 num_materials;
 	Material *materials;
+
+	i32 num_point_lights;
+	PointLight *point_lights;
 };
 
 struct Ray {
@@ -347,6 +355,10 @@ main(void)
 		scene.background_color = o3f;
 		init_camera(&scene.camera, 40.0f / 180.0f * M_PI, vec3f(8.3f, -8.9f, 1.2f), vec3f(0.0f, 0.0f, 1.0f));
 
+		static PointLight point_lights[1];
+		point_lights[0].intensity = 1.0f;
+		point_lights[0].position = vec3f(-3.5f, -2.0f, 3.0f);
+
 		static Material materials[2];
 		materials[0].color = vec3f(1.0f, 0.0f, 0.0f);
 		materials[1].color = vec3f(0.0f, 1.0f, 0.0f);
@@ -361,14 +373,17 @@ main(void)
 		spheres[0].radius = 1.0f;
 		spheres[0].material_index = 1;
 
+		scene.materials = materials;
+		scene.num_materials = arr_len(materials);
+
 		scene.planes = planes;
 		scene.num_planes = arr_len(planes);
 		
 		scene.spheres = spheres;
 		scene.num_spheres = arr_len(spheres);
 
-		scene.materials = materials;
-		scene.num_materials = arr_len(materials);
+		scene.point_lights = point_lights;
+		scene.num_point_lights = arr_len(point_lights);
 	}
 
 	for (i32 y = 0; y < image->height; y++) {
@@ -413,24 +428,28 @@ main(void)
 			// Do shading calculations.
 			Vec3f pixelColor = scene.background_color;
 			if (closest_material_index >= 0) {
-				Vec3f light_pos = vec3f(-3.5f, -2.0f, 3.0f);
-
 				Material *material = scene.materials + closest_material_index;
-
-				Vec3f c_cool = vec3f(0.0f, 0.0f, 0.3f) + 0.35 * material->color;
-				Vec3f c_warm = vec3f(0.3f, 0.3f, 0.0f) + 0.35 * material->color;
-				Vec3f c_highlight = vec3f(1.0f, 1.0f, 1.0f);
 
 				closest_normal = normalized(closest_normal);
 				Vec3f hit_point = evaluate_ray(&ray, closest_t);
-				Vec3f w_i = normalized(light_pos - hit_point);
-				Vec3f w_o = -ray.direction;
 
-				float t = 0.5f * (dot(closest_normal, w_i) + 1.0f);
-				Vec3f reflected = -w_i + 2.0f * dot(closest_normal, w_i) * closest_normal;
-				float s = clamp01(100.0f * dot(reflected, w_o) - 97.0f);
+				pixelColor = o3f;
+				for (i32 point_light_index = 0; point_light_index < scene.num_point_lights; point_light_index++) {
+					PointLight *point_light = scene.point_lights + point_light_index;
 
-				pixelColor = lerp(lerp(c_cool, c_warm, t), c_highlight, s);
+					Vec3f c_cool = vec3f(0.0f, 0.0f, 0.3f) + 0.35 * material->color;
+					Vec3f c_warm = vec3f(0.3f, 0.3f, 0.0f) + 0.35 * material->color;
+					Vec3f c_highlight = vec3f(1.0f, 1.0f, 1.0f);
+
+					Vec3f w_i = normalized(point_light->position - hit_point);
+					Vec3f w_o = -ray.direction;
+
+					float t = 0.5f * (dot(closest_normal, w_i) + 1.0f);
+					Vec3f reflected = -w_i + 2.0f * dot(closest_normal, w_i) * closest_normal;
+					float s = clamp01(100.0f * dot(reflected, w_o) - 97.0f);
+
+					pixelColor += lerp(lerp(c_cool, c_warm, t), c_highlight, s);
+				}
 			}
 
 			for (i32 i = 0; i < 3; i++) {
