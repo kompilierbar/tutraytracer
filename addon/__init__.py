@@ -27,6 +27,8 @@ import bpy
 from addon.test_op import Test_OT_Operator
 from addon.test_panel import Test_PT_Panel
 
+import addon.bin.raytracer
+
 classes = (Test_OT_Operator, Test_PT_Panel)
 
 register, unregister = bpy.utils.register_classes_factory(classes)

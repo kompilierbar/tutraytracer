@@ -6,6 +6,10 @@
 #include <string.h>
 #include <math.h>
 
+#include <Python.h>
+
+#define dllExport extern "C" __declspec(dllexport)
+
 #ifndef M_PI
 #define M_PI 3.141592653589793238
 #endif
@@ -341,6 +345,12 @@ intersect_ray_sphere(Ray *ray, Sphere *sphere)
 	}
 
 	return NAN;
+}
+
+dllExport PyObject *
+PyInit_raytracer(void)
+{
+	return 0;
 }
 
 extern int
