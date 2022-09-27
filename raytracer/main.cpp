@@ -1,14 +1,17 @@
 #pragma warning(disable:4996)
 
+// Include this before any standard headers!
+#define PY_SSIZE_T_CLEAN
+#include <Python.h>
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
 #include <math.h>
 
-#include <Python.h>
-
 #define dllExport extern "C" __declspec(dllexport)
+#define staticC extern "C" static
 
 #ifndef M_PI
 #define M_PI 3.141592653589793238
@@ -62,6 +65,23 @@ union Vec3f {
 	float el[3];
 };
 
+union Vec4f {
+	struct {
+		float x, y, z, w;
+	};
+
+	struct {
+		float r, g, b, a;
+	};
+
+	struct {
+		Vec3f xyz;
+		float dummy;
+	};
+
+	float el[4];
+};
+
 static Vec3f
 vec3f(float x, float y, float z)
 {
@@ -69,6 +89,26 @@ vec3f(float x, float y, float z)
 	v.x = x;
 	v.y = y;
 	v.z = z;
+	return v;
+}
+
+static Vec4f
+vec4f(float x, float y, float z, float w)
+{
+	Vec4f v;
+	v.x = x;
+	v.y = y;
+	v.z = z;
+	v.w = w;
+	return v;
+}
+
+static Vec4f
+vec4f(Vec3f xyz, float w)
+{
+	Vec4f v;
+	v.xyz = xyz;
+	v.w = w;
 	return v;
 }
 
@@ -173,11 +213,23 @@ lerp(Vec3f x, Vec3f y, float t)
 }
 
 // RGBA 8 bits per channel.
+enum ImageFormat {
+	ImageFormat_rgba8,
+	ImageFormat_rgba32f
+};
+
 struct Image {
+	bool freeDataOnTermination;
+	ImageFormat format;
+
 	i32 width;
 	i32 height;
 
-	u8* data;
+	union {
+		void *data_opaque;
+		u8 *data_u8;
+		float *data_float;
+	};
 };
 
 struct Camera {
@@ -216,8 +268,6 @@ struct PointLight {
 };
 
 struct Scene {
-	Camera camera;
-
 	Vec3f background_color;
 
 	i32 num_planes;
@@ -240,24 +290,50 @@ struct Ray {
 };
 
 static void
-init_image(Image *image, i32 width, i32 height)
+init_image(Image *image, ImageFormat format, i32 width, i32 height, void *data = 0)
 {
+	image->format = format;
+
 	image->width = width;
 	image->height = height;
 
-	image->data = (u8 *)malloc(width * height * 4);
+	image->freeDataOnTermination = true;
+	if (data) {
+		image->freeDataOnTermination = true;
+		image->data_opaque = data;
+	} else if (format == ImageFormat_rgba32f) {
+		image->data_float = (float *)malloc(width * height * 32);
+	} else if (format == ImageFormat_rgba8) {
+		image->data_u8 = (u8 *)malloc(width * height * 4);
+	}
 }
 
 static void
 terminate_image(Image *image)
 {
-	free(image->data);
+	if (image->freeDataOnTermination) {
+		free(image->data_opaque);
+	}
 }
 
-static u8*
-get_image_pixel(Image *image, i32 x, i32 y)
+static void
+write_image_pixel(Image *image, i32 x, i32 y, Vec4f color)
 {
-	return image->data + 4 * (y * image->width + x);
+	switch (image->format) {
+	case ImageFormat_rgba32f: {
+		float *px = image->data_float + 4 * (y * image->width + x);
+		for (i32 i = 0; i < 4; i++) {
+			px[i] = color.el[i];
+		}
+	} break;
+
+	case ImageFormat_rgba8: {
+		u8 *px = image->data_u8 + 4 * (y * image->width + x);
+		for (i32 i = 0; i < 4; i++) {
+			px[i] = color.el[i] * 255;
+		}
+	} break;
+	}
 }
 
 static void
@@ -347,23 +423,141 @@ intersect_ray_sphere(Ray *ray, Sphere *sphere)
 	return NAN;
 }
 
-dllExport PyObject *
-PyInit_raytracer(void)
+struct PythonImage {
+	PyObject_HEAD
+	Image image;
+};
+
+static void
+register_python_image_type()
 {
-	return 0;
+	static PyTypeObject python_image_type ={
+		PyVarObject_HEAD_INIT(NULL, 0)
+	};
+	python_image_type.tp_name = "tutrt.PythonImage";
+	python_image_type.tp_basicsize = sizeof(PythonImage);
+	python_image_type.tp_itemsize = 0;
+	python_image_type.tp_flags = Py_TPFLAGS_DEFAULT;
+	python_image_type.tp_new = PyType_GenericNew;
 }
 
-extern int
-main(void)
-{
-	Image image[1];
 
-	init_image(image, 1920, 1080);
+static void
+render_scene(Image *image, Scene *scene, Camera *camera)
+{
+	for (i32 y = 0; y < image->height; y++) {
+		for (i32 x = 0; x < image->width; x++) {
+			Ray ray = generate_camera_ray(camera, image, x, y);
+
+			bool intersected = false;
+
+			float closest_t = INFINITY;
+			i32 closest_material_index = -1;
+			Vec3f closest_normal = o3f;
+
+			for (i32 plane_index = 0; plane_index < scene->num_planes; plane_index++) {
+				Plane *plane = scene->planes + plane_index;
+
+				float t = intersect_ray_plane(&ray, plane);
+
+				if (t < closest_t) {
+					closest_t = t;
+					closest_material_index = plane->material_index;
+					closest_normal = plane->normal;
+				}
+			}
+
+
+			for (i32 sphere_index = 0; sphere_index < scene->num_spheres; sphere_index++) {
+				Sphere *sphere = scene->spheres + sphere_index;
+
+				float t = intersect_ray_sphere(&ray, sphere);
+
+				if (t < closest_t) {
+					closest_t = t;
+					closest_material_index = sphere->material_index;
+					closest_normal = evaluate_ray(&ray, t) - sphere->center;
+				}
+			}
+
+			// Do shading calculations.
+			Vec3f pixelColor = scene->background_color;
+			if (closest_material_index >= 0) {
+				Material *material = scene->materials + closest_material_index;
+
+				closest_normal = normalized(closest_normal);
+				Vec3f hit_point = evaluate_ray(&ray, closest_t);
+
+				pixelColor = o3f;
+				for (i32 point_light_index = 0; point_light_index < scene->num_point_lights; point_light_index++) {
+					PointLight *point_light = scene->point_lights + point_light_index;
+
+					Vec3f c_cool = vec3f(0.0f, 0.0f, 0.3f) + 0.35 * material->color;
+					Vec3f c_warm = vec3f(0.3f, 0.3f, 0.0f) + 0.35 * material->color;
+					Vec3f c_highlight = vec3f(1.0f, 1.0f, 1.0f);
+
+					Vec3f w_i = normalized(point_light->position - hit_point);
+					Vec3f w_o = -ray.direction;
+
+					float t = 0.5f * (dot(closest_normal, w_i) + 1.0f);
+					Vec3f reflected = -w_i + 2.0f * dot(closest_normal, w_i) * closest_normal;
+					float s = clamp01(100.0f * dot(reflected, w_o) - 97.0f);
+
+					pixelColor += lerp(lerp(c_cool, c_warm, t), c_highlight, s);
+				}
+			}
+
+			write_image_pixel(image, x, y, vec4f(pixelColor, 1.0f));
+		}
+	}
+}
+
+staticC PyObject *
+python_render(PyObject *self, PyObject *args)
+{
+	PyObject *python_image;
+	PyObject *python_camera;
+	PyObject *python_scene;
+
+	if (!PyArg_ParseTuple(args, "OOO", &python_image, &python_camera, &python_scene)) {
+		return 0;
+	}
+
+	PyObject *dimensions = PyObject_GetAttrString(python_image, "dimensions");
+	if (!dimensions) return 0;
+	printf("dimensions %p\n", dimensions);
+
+	PyObject *python_width = PyTuple_GetItem(dimensions, 0);
+	if (!python_width) return 0;
+	i32 width = PyLong_AsLong(python_width);
+
+	PyObject *python_height = PyTuple_GetItem(dimensions, 1);
+	if (!python_height) return 0;
+	i32 height = PyLong_AsLong(python_height);
+
+	PyObject *python_buffer = PyObject_GetAttrString(python_image, "buffer");
+	if (!python_buffer) return 0;
+
+	Image image;
+
+	printf("dimensions %ldx%ld\n", width, height);
 
 	Scene scene;
+	Camera camera;
+
+	Py_buffer buffer_view = {};
+	if (PyObject_GetBuffer(python_buffer, &buffer_view, PyBUF_WRITABLE) < 0) {
+		return 0;
+	}
+
+	void *buffer = buffer_view.buf;
+	printf("Buffer: %p\n", buffer);
+	init_image(&image, ImageFormat_rgba32f, width, height, buffer);
+
+	init_camera(&camera, 40.0f / 180.0f * M_PI, vec3f(8.3f, -8.9f, 1.2f), vec3f(0.0f, 0.0f, 1.0f));
+
 	{ // Initialize the scene.
 		scene.background_color = o3f;
-		init_camera(&scene.camera, 40.0f / 180.0f * M_PI, vec3f(8.3f, -8.9f, 1.2f), vec3f(0.0f, 0.0f, 1.0f));
 
 		static PointLight point_lights[1];
 		point_lights[0].intensity = 1.0f;
@@ -388,7 +582,7 @@ main(void)
 
 		scene.planes = planes;
 		scene.num_planes = arr_len(planes);
-		
+
 		scene.spheres = spheres;
 		scene.num_spheres = arr_len(spheres);
 
@@ -396,82 +590,30 @@ main(void)
 		scene.num_point_lights = arr_len(point_lights);
 	}
 
-	for (i32 y = 0; y < image->height; y++) {
-		for (i32 x = 0; x < image->width; x++) {
-			u8 *pixel = get_image_pixel(image, x, y);
+	printf("Rendering scene");
+	render_scene(&image, &scene, &camera);
 
-			Ray ray = generate_camera_ray(&scene.camera, image, x, y);
+	PyBuffer_Release(&buffer_view);
 
-			bool intersected = false;
+	Py_INCREF(Py_None);
+	return Py_None;
+}
 
-			float closest_t = INFINITY;
-			i32 closest_material_index = -1;
-			Vec3f closest_normal = o3f;
+static PyMethodDef python_functions[] ={
+	{"render", python_render, METH_VARARGS, "Render an image."},
+	{nullptr, nullptr, 0, nullptr}
+};
 
-			for (i32 plane_index = 0; plane_index < scene.num_planes; plane_index++) {
-				Plane *plane = scene.planes + plane_index;
+static PyModuleDef python_module ={
+	PyModuleDef_HEAD_INIT,
+	"raytracer",
+	nullptr,
+	-1,
+	python_functions
+};
 
-				float t = intersect_ray_plane(&ray, plane);
-
-				if (t < closest_t) {
-					closest_t = t;
-					closest_material_index = plane->material_index;
-					closest_normal = plane->normal;
-				}
-			}
-
-
-			for (i32 sphere_index = 0; sphere_index < scene.num_spheres; sphere_index++) {
-				Sphere *sphere = scene.spheres + sphere_index;
-
-				float t = intersect_ray_sphere(&ray, sphere);
-
-				if (t < closest_t) {
-					closest_t = t;
-					closest_material_index = sphere->material_index;
-					closest_normal = evaluate_ray(&ray, t) - sphere->center;
-				}
-			}
-
-			pixel[3] = 255;
-			
-			// Do shading calculations.
-			Vec3f pixelColor = scene.background_color;
-			if (closest_material_index >= 0) {
-				Material *material = scene.materials + closest_material_index;
-
-				closest_normal = normalized(closest_normal);
-				Vec3f hit_point = evaluate_ray(&ray, closest_t);
-
-				pixelColor = o3f;
-				for (i32 point_light_index = 0; point_light_index < scene.num_point_lights; point_light_index++) {
-					PointLight *point_light = scene.point_lights + point_light_index;
-
-					Vec3f c_cool = vec3f(0.0f, 0.0f, 0.3f) + 0.35 * material->color;
-					Vec3f c_warm = vec3f(0.3f, 0.3f, 0.0f) + 0.35 * material->color;
-					Vec3f c_highlight = vec3f(1.0f, 1.0f, 1.0f);
-
-					Vec3f w_i = normalized(point_light->position - hit_point);
-					Vec3f w_o = -ray.direction;
-
-					float t = 0.5f * (dot(closest_normal, w_i) + 1.0f);
-					Vec3f reflected = -w_i + 2.0f * dot(closest_normal, w_i) * closest_normal;
-					float s = clamp01(100.0f * dot(reflected, w_o) - 97.0f);
-
-					pixelColor += lerp(lerp(c_cool, c_warm, t), c_highlight, s);
-				}
-			}
-
-			for (i32 i = 0; i < 3; i++) {
-				pixel[i] = pixelColor.el[i] * 255;
-			}
-		}  
-	}
-
-	printf("Writing image to disk ...\n");
-	stbi_write_png("out.png", image->width, image->height, 4, image->data, image->width * 4);
-
-	terminate_image(image);
-
-	return EXIT_SUCCESS;
+dllExport PyObject *
+PyInit_raytracer(void)
+{
+	return PyModule_Create(&python_module);
 }
