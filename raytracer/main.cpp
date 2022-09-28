@@ -20,6 +20,9 @@
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
 
+// TODO: Roll own assert?
+#define dbgAssert(x) assert(x)
+
 typedef uint8_t u8;
 typedef uint16_t u16;
 typedef uint32_t u32;
@@ -81,6 +84,20 @@ union Vec4f {
 
 	float el[4];
 };
+
+union Mat4f {
+	Vec4f rows[4];
+	float el[4][4];
+};
+
+static void
+print_mat4f(Mat4f matrix)
+{
+	printf("(%.4f %.4f %.4f %.4f\n",  matrix.el[0][0], matrix.el[0][1], matrix.el[0][2], matrix.el[0][3]);
+	printf(" %.4f %.4f %.4f %.4f\n",  matrix.el[1][0], matrix.el[1][1], matrix.el[1][2], matrix.el[1][3]);
+	printf(" %.4f %.4f %.4f %.4f\n",  matrix.el[2][0], matrix.el[2][1], matrix.el[2][2], matrix.el[2][3]);
+	printf(" %.4f %.4f %.4f %.4f)\n", matrix.el[3][0], matrix.el[3][1], matrix.el[3][2], matrix.el[3][3]);
+}
 
 static Vec3f
 vec3f(float x, float y, float z)
@@ -173,6 +190,18 @@ operator / (Vec3f v, float f)
 	return (1.0f / f) * v;
 }
 
+static Vec3f
+perspective_divide(Vec4f v)
+{
+	return vec3f(v.x / v.w, v.y / v.w, v.z / v.w);
+}
+
+static float
+dot(Vec4f a, Vec4f b)
+{
+	return a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
+}
+
 static float
 dot(Vec3f a, Vec3f b)
 {
@@ -212,6 +241,17 @@ lerp(Vec3f x, Vec3f y, float t)
 	return vec3f(lerp(x.x, y.x, t), lerp(x.y, y.y, t), lerp(x.z, y.z, t));
 }
 
+static Vec4f
+operator * (Mat4f m, Vec4f v)
+{
+	Vec4f result;
+	result.x = dot(m.rows[0], v);
+	result.y = dot(m.rows[1], v);
+	result.z = dot(m.rows[2], v);
+	result.w = dot(m.rows[3], v);
+	return result;
+}
+
 // RGBA 8 bits per channel.
 enum ImageFormat {
 	ImageFormat_rgba8,
@@ -233,14 +273,7 @@ struct Image {
 };
 
 struct Camera {
-	Vec3f origin;
-
-	// Unit vectors.
-	Vec3f forward;
-	Vec3f up;
-	Vec3f right;
-
-	float tan_half_field_of_view;
+	Mat4f inv_view_proj_matrix;
 };
 
 struct Material {
@@ -339,12 +372,8 @@ write_image_pixel(Image *image, i32 x, i32 y, Vec4f color)
 static void
 init_camera(Camera *camera, float field_of_view, Vec3f origin, Vec3f look_at)
 {
-	camera->tan_half_field_of_view = tanf(0.5f * field_of_view);
-	camera->origin = origin;
-
-	camera->forward = normalized(look_at - origin);
-	camera->right = normalized(cross(camera->forward, z3f));
-	camera->up = cross(camera->right, camera->forward);
+	// TODO: Compute view projection matrix?
+	dbgAssert(0);
 }
 
 static Ray
@@ -356,13 +385,16 @@ generate_camera_ray(Camera *camera, Image *image, i32 x, i32 y)
 	float relative_x = (float)(x - 0.5f * image->width) * two_over_max_dim;
 	float relative_y = (float)(y - 0.5f * image->height) * two_over_max_dim;
 
-	ray.origin = camera->origin;
+	ray.origin = perspective_divide(
+		camera->inv_view_proj_matrix * 
+		vec4f(2.0f * x / image->width - 1.0f, 2.0f * y / image->height - 1.0f, -1.0f, 1.0f)
+	);
 
-	ray.direction = camera->forward +
-		relative_x * camera->tan_half_field_of_view * camera->right -
-		relative_y * camera->tan_half_field_of_view * camera->up;
-
-	ray.direction = normalized(ray.direction);
+	Vec3f target = perspective_divide(
+		camera->inv_view_proj_matrix *
+		vec4f(2.0f * x / image->width - 1.0f, 2.0f * y / image->height - 1.0f, 0.0f, 1.0f)
+	);
+	ray.direction = normalized(target - ray.origin);
 
 	return ray;
 }
@@ -538,12 +570,45 @@ python_render(PyObject *self, PyObject *args)
 	PyObject *python_buffer = PyObject_GetAttrString(python_image, "buffer");
 	if (!python_buffer) return 0;
 
+	PyObject *python_inv_view_proj_matrix = PyObject_GetAttrString(python_camera, "inv_view_proj_matrix");
+	if (!python_inv_view_proj_matrix) return 0;
+
+	Mat4f inv_view_proj_matrix;
+	{
+		PyObject *row_iter = PyObject_GetIter(python_inv_view_proj_matrix);
+		if (!row_iter) return 0;
+
+		PyObject *row;
+		i32 i = 0;
+		while (row = PyIter_Next(row_iter)) {
+			PyObject *entry_iter = PyObject_GetIter(row);
+			if (!entry_iter) return 0;
+
+			PyObject *entry;
+			i32 j = 0;
+			while (entry = PyIter_Next(entry_iter)) {
+				inv_view_proj_matrix.el[i][j] = PyFloat_AsDouble(entry);
+				Py_DECREF(entry);
+				j++;
+			}
+
+			Py_DECREF(entry_iter);
+			Py_DECREF(row);
+			i++;
+		}
+		Py_DECREF(row_iter);
+	}
+
+	Camera camera;
+	camera.inv_view_proj_matrix = inv_view_proj_matrix;
+
+	print_mat4f(inv_view_proj_matrix);
+
 	Image image;
 
 	printf("dimensions %ldx%ld\n", width, height);
 
 	Scene scene;
-	Camera camera;
 
 	Py_buffer buffer_view = {};
 	if (PyObject_GetBuffer(python_buffer, &buffer_view, PyBUF_WRITABLE) < 0) {
@@ -554,7 +619,7 @@ python_render(PyObject *self, PyObject *args)
 	printf("Buffer: %p\n", buffer);
 	init_image(&image, ImageFormat_rgba32f, width, height, buffer);
 
-	init_camera(&camera, 40.0f / 180.0f * M_PI, vec3f(8.3f, -8.9f, 1.2f), vec3f(0.0f, 0.0f, 1.0f));
+	//init_camera(&camera, 40.0f / 180.0f * M_PI, vec3f(8.3f, -8.9f, 1.2f), vec3f(0.0f, 0.0f, 1.0f));
 
 	{ // Initialize the scene.
 		scene.background_color = o3f;

@@ -26,6 +26,7 @@ import bpy
 import array
 import gpu
 from gpu_extras.presets import draw_texture_2d
+from mathutils import *
 
 import addon.bin.raytracer as rt
 
@@ -41,9 +42,12 @@ class Scene:
         self.spheres = []
 
 class Camera:
-    def __init__(self, dimensions):
-        self.view_projection_matrix = None
-        self.dimensions = dimensions
+    def __init__(self, view_projection_matrix):
+        self.inv_view_proj_matrix = view_projection_matrix.inverted()
+        p = self.inv_view_proj_matrix @ Vector((0.0, 0.0, -1.0))
+        print(p)
+        print(p.to_3d())
+        #self.dimensions = dimensions
 
 class TutRaytracerRenderEngine(bpy.types.RenderEngine):
     # These three members are used by blender to set up the
@@ -56,8 +60,8 @@ class TutRaytracerRenderEngine(bpy.types.RenderEngine):
     # instances may exist at the same time, for example for a viewport and final
     # render.
     def __init__(self):
-        self.scene_data = None
-        self.camera_data = None
+        self.scene = None
+        self.camera = None
 
     # When the render engine instance is destroyed, this is called. Clean up any
     # render engine data here, for example stopping running render threads.
@@ -103,9 +107,9 @@ class TutRaytracerRenderEngine(bpy.types.RenderEngine):
 
         print("View update running")
 
-        if not self.scene_data:
+        if not self.scene:
             # First time initialization
-            self.scene_data = Scene()
+            self.scene = Scene()
             first_time = True
 
             # Loop over all datablocks used in the scene.
@@ -139,20 +143,20 @@ class TutRaytracerRenderEngine(bpy.types.RenderEngine):
 
         # Get viewport dimensions
         dimensions = region.width, region.height
-        view_projection_matrix = context.region_data.perspective_matrix * context.region_data.view_matrix.inverted()
+        view_projection_matrix = context.region_data.perspective_matrix# * context.region_data.view_matrix.inverted()
 
         # Bind shader that converts from scene linear to display space,
         gpu.state.blend_set('ALPHA_PREMULT')
         self.bind_display_space_shader(scene)
 
-        if not self.camera_data or self.camera_data.dimensions != dimensions or self.camera_data.view_projection_matrix != view_projection_matrix:
-            self.camera_data = Camera(dimensions)
+        self.camera = Camera(view_projection_matrix)
 
         # Generate dummy float image buffer
         width, height = dimensions
 
         image = Image(dimensions)
-        rt.render(image, self.camera_data, self.scene_data)
+        print(self.camera.inv_view_proj_matrix)
+        rt.render(image, self.camera, self.scene)
         #print(image.buffer)
 
         # Generate texture
@@ -161,8 +165,8 @@ class TutRaytracerRenderEngine(bpy.types.RenderEngine):
         self.texture = gpu.types.GPUTexture((width, height), format="RGBA8", data=image.buffer)
         print(image.buffer[0:4])
         
-        draw_texture_2d(self.texture, (0, self.texture.height), self.texture.width, -self.texture.height)
-        #draw_texture_2d(self.texture, (0, 0), self.texture.width, self.texture.height)
+        #draw_texture_2d(self.texture, (0, self.texture.height), self.texture.width, -self.texture.height)
+        draw_texture_2d(self.texture, (0, 0), self.texture.width, self.texture.height)
 
         self.unbind_display_space_shader()
         gpu.state.blend_set('NONE')
