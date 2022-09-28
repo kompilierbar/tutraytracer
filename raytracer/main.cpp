@@ -598,6 +598,7 @@ python_render(PyObject *self, PyObject *args)
 		}
 		Py_DECREF(row_iter);
 	}
+	Py_DECREF(python_inv_view_proj_matrix);
 
 	Camera camera;
 	camera.inv_view_proj_matrix = inv_view_proj_matrix;
@@ -659,6 +660,7 @@ python_render(PyObject *self, PyObject *args)
 	render_scene(&image, &scene, &camera);
 
 	PyBuffer_Release(&buffer_view);
+	Py_DECREF(python_buffer);
 
 	Py_INCREF(Py_None);
 	return Py_None;
