@@ -167,7 +167,8 @@ class TutRaytracerRenderEngine(bpy.types.RenderEngine):
         for instance in depsgraph.object_instances:
             object = instance.object
             if object.original.get("tutrt_type", "None") == "sphere":
-                sphere = Sphere(instance.matrix_world)
+                sphere = Sphere(instance.matrix_world.copy())
+                print(instance.matrix_world)
                 self.scene.spheres.append(sphere)
 
         rt.render(image, self.camera, self.scene)

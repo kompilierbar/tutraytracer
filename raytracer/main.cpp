@@ -717,6 +717,7 @@ python_render(PyObject *self, PyObject *args)
 
 	PyObject *python_spheres = PyObject_GetAttrString(python_scene, "spheres");
 	scene.num_spheres = PyObject_Length(python_spheres);
+	printf("num_spheres is %d\n", scene.num_spheres);
 	scene.spheres = (Sphere *)malloc(sizeof(Sphere) * scene.num_spheres);
 
 	PyObject *sphere_iter = PyObject_GetIter(python_spheres);
@@ -724,6 +725,8 @@ python_render(PyObject *self, PyObject *args)
 	PyObject *python_sphere;
 	Sphere *sphere = scene.spheres;
 	while (python_sphere = PyIter_Next(sphere_iter)) {
+		printf("Adding sphere %p\n", sphere);
+
 		PyObject *python_model_matrix = PyObject_GetAttrString(python_sphere, "model_matrix");
 		if (!python_model_matrix) return 0;
 		if (python_read_mat4f(python_model_matrix, &sphere->model_matrix) < 0) return 0;
