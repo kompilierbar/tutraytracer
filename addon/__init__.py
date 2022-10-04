@@ -37,17 +37,22 @@ class Image:
         #self.buffer = bytearray(width * height * 4)
         self.buffer = gpu.types.Buffer("FLOAT", width * height * 4)
 
+class Sphere:
+    def __init__(self, model_matrix):
+        self.model_matrix = model_matrix
+
+class Plane:
+    def __init__(self, model_matrix):
+        self.model_matrix = model_matrix
+
 class Scene:
     def __init__(self):
         self.spheres = []
+        self.planes = []
 
 class Camera:
     def __init__(self, view_projection_matrix):
         self.inv_view_proj_matrix = view_projection_matrix.inverted()
-        p = self.inv_view_proj_matrix @ Vector((0.0, 0.0, -1.0))
-        print(p)
-        print(p.to_3d())
-        #self.dimensions = dimensions
 
 class TutRaytracerRenderEngine(bpy.types.RenderEngine):
     # These three members are used by blender to set up the
@@ -155,7 +160,16 @@ class TutRaytracerRenderEngine(bpy.types.RenderEngine):
         width, height = dimensions
 
         image = Image(dimensions)
-        print(self.camera.inv_view_proj_matrix)
+        print(self.camera.inv_view_proj_matrix.inverted())
+
+        self.scene = Scene()
+
+        for instance in depsgraph.object_instances:
+            object = instance.object
+            if object.original.get("tutrt_type", "None") == "sphere":
+                sphere = Sphere(instance.matrix_world)
+                self.scene.spheres.append(sphere)
+
         rt.render(image, self.camera, self.scene)
         #print(image.buffer)
 

@@ -99,6 +99,7 @@ print_mat4f(Mat4f matrix)
 	printf(" %.4f %.4f %.4f %.4f)\n", matrix.el[3][0], matrix.el[3][1], matrix.el[3][2], matrix.el[3][3]);
 }
 
+
 static Vec3f
 vec3f(float x, float y, float z)
 {
@@ -252,6 +253,59 @@ operator * (Mat4f m, Vec4f v)
 	return result;
 }
 
+static Mat4f
+operator / (Mat4f m, float f)
+{
+	for (i32 i = 0; i < 4; i++) {
+		for (i32 j = 0; j < 4; j++) {
+			m.el[i][j] /= f;
+		}
+	}
+
+	return m;
+}
+
+static Mat4f
+inv_mat4f(Mat4f m)
+{
+	Mat4f result;
+
+	// Compute the adjugate matrix
+#define sarrus(a11, a12, a13, a21, a22, a23, a31, a32, a33) \
+	(a11*a22*a33 + a12*a23*a31 + a13*a21*a32 - a11*a23*a32 - a12*a21*a33 - a13*a22*a31)
+
+#define cofactor(ro1, ro2, ro3, col1, col2, col3) \
+	sarrus( \
+		m.el[ro1][col1], m.el[ro1][col2], m.el[ro1][col3], \
+		m.el[ro2][col1], m.el[ro2][col2], m.el[ro2][col3], \
+		m.el[ro3][col1], m.el[ro3][col2], m.el[ro3][col3] \
+	)
+
+	result.el[0][0] = +cofactor(1, 2, 3, 1, 2, 3);
+	result.el[0][1] = -cofactor(0, 2, 3, 1, 2, 3);
+	result.el[0][2] = +cofactor(0, 1, 3, 1, 2, 3);
+	result.el[0][3] = -cofactor(0, 1, 2, 1, 2, 3);
+	result.el[1][0] = -cofactor(1, 2, 3, 0, 2, 3);
+	result.el[1][1] = +cofactor(0, 2, 3, 0, 2, 3);
+	result.el[1][2] = -cofactor(0, 1, 3, 0, 2, 3);
+	result.el[1][3] = +cofactor(0, 1, 2, 0, 2, 3);
+	result.el[2][0] = +cofactor(1, 2, 3, 0, 1, 3);
+	result.el[2][1] = -cofactor(0, 2, 3, 0, 1, 3);
+	result.el[2][2] = +cofactor(0, 1, 3, 0, 1, 3);
+	result.el[2][3] = -cofactor(0, 1, 2, 0, 1, 3);
+	result.el[3][0] = -cofactor(1, 2, 3, 0, 1, 2);
+	result.el[3][1] = +cofactor(0, 2, 3, 0, 1, 2);
+	result.el[3][2] = -cofactor(0, 1, 3, 0, 1, 2);
+	result.el[3][3] = +cofactor(0, 1, 2, 0, 1, 2);
+
+#undef cofactor
+#undef sarrus
+
+	float det = m.el[0][0]*result.el[0][0] + m.el[1][0]*result.el[0][1] + m.el[2][0]*result.el[0][2] + m.el[3][0] * result.el[0][3];
+	
+	return result / det;
+}
+
 // RGBA 8 bits per channel.
 enum ImageFormat {
 	ImageFormat_rgba8,
@@ -289,8 +343,8 @@ struct Plane {
 };
 
 struct Sphere {
-	Vec3f center;
-	float radius;
+	Mat4f model_matrix;
+	Mat4f inv_model_matrix;
 
 	i32 material_index;
 };
@@ -405,6 +459,15 @@ evaluate_ray(Ray *ray, float t)
 	return ray->origin + t * ray->direction;
 }
 
+static Ray
+operator * (Mat4f m, Ray ray)
+{
+	Ray result;
+	result.origin = (m * vec4f(ray.origin, 1.0f)).xyz;
+	result.direction = (m * vec4f(ray.direction, 0.0f)).xyz;
+	return result;
+}
+
 #define epsilon 0.0001
 
 static float
@@ -430,9 +493,12 @@ intersect_ray_plane(Ray *ray, Plane *plane)
 static float
 intersect_ray_sphere(Ray *ray, Sphere *sphere)
 {
-	Vec3f sphere_local_origin = ray->origin - sphere->center;
-	float B = 2.0f * dot(sphere_local_origin, ray->direction);
-	float C = squared_norm(sphere_local_origin) - sphere->radius * sphere->radius;
+	Ray local_ray = sphere->inv_model_matrix * (*ray);
+	float local_ray_len = norm(local_ray.direction);
+	local_ray.direction *= 1.0f / local_ray_len;
+
+	float B = 2.0f * dot(local_ray.origin, local_ray.direction);
+	float C = squared_norm(local_ray.origin) - 1.0f;
 
 	float discriminant = B * B - 4 * C;
 
@@ -444,12 +510,12 @@ intersect_ray_sphere(Ray *ray, Sphere *sphere)
 
 	float twice_t1 = -B - sqrt_discriminant;
 	if (twice_t1 >= epsilon) {
-		return 0.5f * twice_t1;
+		return 0.5f * twice_t1 / local_ray_len;
 	}
 
 	float twice_t2 = -B + sqrt_discriminant;
 	if (twice_t2 >= epsilon) {
-		return 0.5f * twice_t2;
+		return 0.5f * twice_t2 / local_ray_len;
 	}
 
 	return NAN;
@@ -508,7 +574,7 @@ render_scene(Image *image, Scene *scene, Camera *camera)
 				if (t < closest_t) {
 					closest_t = t;
 					closest_material_index = sphere->material_index;
-					closest_normal = evaluate_ray(&ray, t) - sphere->center;
+					closest_normal = evaluate_ray(&ray, t) - vec3f(sphere->model_matrix.el[0][0], sphere->model_matrix.el[1][0], sphere->model_matrix.el[2][0]);
 				}
 			}
 
@@ -544,6 +610,40 @@ render_scene(Image *image, Scene *scene, Camera *camera)
 	}
 }
 
+static int
+python_read_mat4f(PyObject *python_matrix, Mat4f *r_result)
+{
+	Mat4f result;
+	{
+		PyObject *row_iter = PyObject_GetIter(python_matrix);
+		if (!row_iter) return -1;
+
+		PyObject *row;
+		i32 i = 0;
+		while (row = PyIter_Next(row_iter)) {
+			PyObject *entry_iter = PyObject_GetIter(row);
+			if (!entry_iter) return -1;
+
+			PyObject *entry;
+			i32 j = 0;
+			while (entry = PyIter_Next(entry_iter)) {
+				result.el[i][j] = PyFloat_AsDouble(entry);
+				Py_DECREF(entry);
+				j++;
+			}
+
+			Py_DECREF(entry_iter);
+			Py_DECREF(row);
+			i++;
+		}
+		Py_DECREF(row_iter);
+	}
+
+	*r_result = result;
+
+	return 0;
+}
+
 staticC PyObject *
 python_render(PyObject *self, PyObject *args)
 {
@@ -573,37 +673,9 @@ python_render(PyObject *self, PyObject *args)
 	PyObject *python_inv_view_proj_matrix = PyObject_GetAttrString(python_camera, "inv_view_proj_matrix");
 	if (!python_inv_view_proj_matrix) return 0;
 
-	Mat4f inv_view_proj_matrix;
-	{
-		PyObject *row_iter = PyObject_GetIter(python_inv_view_proj_matrix);
-		if (!row_iter) return 0;
-
-		PyObject *row;
-		i32 i = 0;
-		while (row = PyIter_Next(row_iter)) {
-			PyObject *entry_iter = PyObject_GetIter(row);
-			if (!entry_iter) return 0;
-
-			PyObject *entry;
-			i32 j = 0;
-			while (entry = PyIter_Next(entry_iter)) {
-				inv_view_proj_matrix.el[i][j] = PyFloat_AsDouble(entry);
-				Py_DECREF(entry);
-				j++;
-			}
-
-			Py_DECREF(entry_iter);
-			Py_DECREF(row);
-			i++;
-		}
-		Py_DECREF(row_iter);
-	}
-	Py_DECREF(python_inv_view_proj_matrix);
-
 	Camera camera;
-	camera.inv_view_proj_matrix = inv_view_proj_matrix;
-
-	print_mat4f(inv_view_proj_matrix);
+	if (python_read_mat4f(python_inv_view_proj_matrix, &camera.inv_view_proj_matrix) < 0) return 0;
+	Py_DECREF(python_inv_view_proj_matrix);
 
 	Image image;
 
@@ -622,42 +694,57 @@ python_render(PyObject *self, PyObject *args)
 
 	//init_camera(&camera, 40.0f / 180.0f * M_PI, vec3f(8.3f, -8.9f, 1.2f), vec3f(0.0f, 0.0f, 1.0f));
 
-	{ // Initialize the scene.
-		scene.background_color = o3f;
+	scene.background_color = o3f;
 
-		static PointLight point_lights[1];
-		point_lights[0].intensity = 1.0f;
-		point_lights[0].position = vec3f(-3.5f, -2.0f, 3.0f);
+	static PointLight point_lights[1];
+	point_lights[0].intensity = 1.0f;
+	point_lights[0].position = vec3f(-3.5f, -2.0f, 3.0f);
+	scene.point_lights = point_lights;
+	scene.num_point_lights = arr_len(point_lights);
 
-		static Material materials[2];
-		materials[0].color = vec3f(1.0f, 0.0f, 0.0f);
-		materials[1].color = vec3f(0.0f, 1.0f, 0.0f);
+	static Material materials[2];
+	materials[0].color = vec3f(1.0f, 0.0f, 0.0f);
+	materials[1].color = vec3f(0.0f, 1.0f, 0.0f);
+	scene.materials = materials;
+	scene.num_materials = arr_len(materials);
 
-		static Plane planes[1];
-		planes[0].origin = o3f;
-		planes[0].normal = z3f;
-		planes[0].material_index = 0;
+	static Plane planes[1];
+	planes[0].origin = o3f;
+	planes[0].normal = z3f;
+	planes[0].material_index = 0;
+	scene.planes = planes;
+	scene.num_planes = arr_len(planes);
 
-		static Sphere spheres[1];
-		spheres[0].center = vec3f(0.0f, 0.0f, 1.0f);
-		spheres[0].radius = 1.0f;
-		spheres[0].material_index = 1;
+	PyObject *python_spheres = PyObject_GetAttrString(python_scene, "spheres");
+	scene.num_spheres = PyObject_Length(python_spheres);
+	scene.spheres = (Sphere *)malloc(sizeof(Sphere) * scene.num_spheres);
 
-		scene.materials = materials;
-		scene.num_materials = arr_len(materials);
+	PyObject *sphere_iter = PyObject_GetIter(python_spheres);
+	if (!sphere_iter) return 0;
+	PyObject *python_sphere;
+	Sphere *sphere = scene.spheres;
+	while (python_sphere = PyIter_Next(sphere_iter)) {
+		PyObject *python_model_matrix = PyObject_GetAttrString(python_sphere, "model_matrix");
+		if (!python_model_matrix) return 0;
+		if (python_read_mat4f(python_model_matrix, &sphere->model_matrix) < 0) return 0;
+		Py_DECREF(python_model_matrix);
 
-		scene.planes = planes;
-		scene.num_planes = arr_len(planes);
+		sphere->inv_model_matrix = inv_mat4f(sphere->model_matrix);
+		print_mat4f(sphere->inv_model_matrix);
 
-		scene.spheres = spheres;
-		scene.num_spheres = arr_len(spheres);
+		sphere->material_index = 1;
 
-		scene.point_lights = point_lights;
-		scene.num_point_lights = arr_len(point_lights);
+
+		Py_DECREF(python_sphere);
+		sphere++;
 	}
+	Py_DECREF(sphere_iter);
+	Py_DECREF(python_spheres);
 
 	printf("Rendering scene");
 	render_scene(&image, &scene, &camera);
+
+	free(scene.spheres);
 
 	PyBuffer_Release(&buffer_view);
 	Py_DECREF(python_buffer);
