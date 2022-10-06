@@ -335,9 +335,8 @@ struct Material {
 };
 
 struct Plane {
-	Vec3f origin;
-	// Unit vector.
-	Vec3f normal;
+	Mat4f model_matrix;
+	Mat4f inv_model_matrix;
 
 	i32 material_index;
 };
@@ -351,7 +350,7 @@ struct Sphere {
 
 struct PointLight {
 	Vec3f position;
-	float intensity;
+	Vec3f strength;
 };
 
 struct Scene {
@@ -473,8 +472,10 @@ operator * (Mat4f m, Ray ray)
 static float
 intersect_ray_plane(Ray *ray, Plane *plane)
 {
-	float numerator = dot(plane->origin - ray->origin, plane->normal);
-	float denominator = dot(ray->direction, plane->normal);
+	Ray local_ray = plane->inv_model_matrix * (*ray);
+
+	float numerator = local_ray.origin.z;
+	float denominator = -local_ray.direction.z;
 
 	float t;
 	if (fabs(denominator) < epsilon) {
@@ -561,7 +562,8 @@ render_scene(Image *image, Scene *scene, Camera *camera)
 				if (t < closest_t) {
 					closest_t = t;
 					closest_material_index = plane->material_index;
-					closest_normal = plane->normal;
+					auto m = plane->model_matrix.el;
+					closest_normal = vec3f(m[0][2], m[1][2], m[2][2]);
 				}
 			}
 
@@ -574,7 +576,8 @@ render_scene(Image *image, Scene *scene, Camera *camera)
 				if (t < closest_t) {
 					closest_t = t;
 					closest_material_index = sphere->material_index;
-					closest_normal = evaluate_ray(&ray, t) - vec3f(sphere->model_matrix.el[0][0], sphere->model_matrix.el[1][0], sphere->model_matrix.el[2][0]);
+					auto m = sphere->model_matrix.el;
+					closest_normal = evaluate_ray(&ray, t) - vec3f(m[0][3], m[1][3], m[2][3]);
 				}
 			}
 
@@ -644,6 +647,29 @@ python_read_mat4f(PyObject *python_matrix, Mat4f *r_result)
 	return 0;
 }
 
+static int
+python_read_vec3f(PyObject *python_vec, Vec3f *r_result)
+{
+	Vec3f result;
+	{
+		PyObject *iter = PyObject_GetIter(python_vec);
+		if (!iter) return -1;
+
+		PyObject *entry;
+		i32 i = 0;
+		while (entry = PyIter_Next(iter)) {
+			result.el[i] = PyFloat_AsDouble(entry);
+			Py_DECREF(entry);
+			i++;
+		}
+		Py_DECREF(iter);
+	}
+
+	*r_result = result;
+
+	return 0;
+}
+
 staticC PyObject *
 python_render(PyObject *self, PyObject *args)
 {
@@ -696,37 +722,50 @@ python_render(PyObject *self, PyObject *args)
 
 	scene.background_color = o3f;
 
-	static PointLight point_lights[1];
-	point_lights[0].intensity = 1.0f;
-	point_lights[0].position = vec3f(-3.5f, -2.0f, 3.0f);
-	scene.point_lights = point_lights;
-	scene.num_point_lights = arr_len(point_lights);
-
 	static Material materials[2];
 	materials[0].color = vec3f(1.0f, 0.0f, 0.0f);
 	materials[1].color = vec3f(0.0f, 1.0f, 0.0f);
 	scene.materials = materials;
 	scene.num_materials = arr_len(materials);
 
-	static Plane planes[1];
-	planes[0].origin = o3f;
-	planes[0].normal = z3f;
-	planes[0].material_index = 0;
-	scene.planes = planes;
-	scene.num_planes = arr_len(planes);
+	//
+	// Read point lights.
+	//
+
+	PyObject *python_point_lights = PyObject_GetAttrString(python_scene, "point_lights");
+	scene.num_point_lights = PyObject_Length(python_point_lights);
+	scene.point_lights = (PointLight *)malloc(sizeof(PointLight) * scene.num_point_lights);
+
+	PyObject *point_light_iter = PyObject_GetIter(python_point_lights);
+	if (!point_light_iter) return 0;
+	PointLight *point_light = scene.point_lights;
+	while (PyObject *python_point_light = PyIter_Next(point_light_iter)) {
+		PyObject *python_position = PyObject_GetAttrString(python_point_light, "position");
+		if (!python_position) return 0;
+		python_read_vec3f(python_position, &point_light->position);
+		Py_DECREF(python_position);
+
+		PyObject *python_strength = PyObject_GetAttrString(python_point_light, "strength");
+		if (!python_strength) return 0;
+		python_read_vec3f(python_strength, &point_light->strength);
+		Py_DECREF(python_strength);
+
+		Py_DECREF(python_point_light);
+		point_light++;
+	}
+
+	//
+	// Read spheres.
+	//
 
 	PyObject *python_spheres = PyObject_GetAttrString(python_scene, "spheres");
 	scene.num_spheres = PyObject_Length(python_spheres);
-	printf("num_spheres is %d\n", scene.num_spheres);
 	scene.spheres = (Sphere *)malloc(sizeof(Sphere) * scene.num_spheres);
 
 	PyObject *sphere_iter = PyObject_GetIter(python_spheres);
 	if (!sphere_iter) return 0;
-	PyObject *python_sphere;
 	Sphere *sphere = scene.spheres;
-	while (python_sphere = PyIter_Next(sphere_iter)) {
-		printf("Adding sphere %p\n", sphere);
-
+	while (PyObject *python_sphere = PyIter_Next(sphere_iter)) {
 		PyObject *python_model_matrix = PyObject_GetAttrString(python_sphere, "model_matrix");
 		if (!python_model_matrix) return 0;
 		if (python_read_mat4f(python_model_matrix, &sphere->model_matrix) < 0) return 0;
@@ -744,10 +783,40 @@ python_render(PyObject *self, PyObject *args)
 	Py_DECREF(sphere_iter);
 	Py_DECREF(python_spheres);
 
+	//
+	// Read planes.
+	//
+
+	PyObject *python_planes = PyObject_GetAttrString(python_scene, "planes");
+	scene.num_planes = PyObject_Length(python_planes);
+	scene.planes = (Plane *)malloc(sizeof(Plane) * scene.num_planes);
+
+	PyObject *plane_iter = PyObject_GetIter(python_planes);
+	if (!plane_iter) return 0;
+	Plane *plane = scene.planes;
+	while (PyObject *python_plane = PyIter_Next(plane_iter)) {
+		PyObject *python_model_matrix = PyObject_GetAttrString(python_plane, "model_matrix");
+		if (!python_model_matrix) return 0;
+		if (python_read_mat4f(python_model_matrix, &plane->model_matrix) < 0) return 0;
+		Py_DECREF(python_model_matrix);
+
+		plane->inv_model_matrix = inv_mat4f(plane->model_matrix);
+
+		plane->material_index = 1;
+
+
+		Py_DECREF(python_plane);
+		plane++;
+	}
+	Py_DECREF(plane_iter);
+	Py_DECREF(python_planes);
+
 	printf("Rendering scene");
 	render_scene(&image, &scene, &camera);
 
 	free(scene.spheres);
+	free(scene.planes);
+	free(scene.point_lights);
 
 	PyBuffer_Release(&buffer_view);
 	Py_DECREF(python_buffer);

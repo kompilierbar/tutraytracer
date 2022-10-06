@@ -37,6 +37,11 @@ class Image:
         #self.buffer = bytearray(width * height * 4)
         self.buffer = gpu.types.Buffer("FLOAT", width * height * 4)
 
+class PointLight:
+    def __init__(self, position, strength):
+        self.position = position
+        self.strength = strength
+
 class Sphere:
     def __init__(self, model_matrix):
         self.model_matrix = model_matrix
@@ -49,12 +54,13 @@ class Scene:
     def __init__(self):
         self.spheres = []
         self.planes = []
+        self.point_lights = []
 
 class Camera:
     def __init__(self, view_projection_matrix):
         self.inv_view_proj_matrix = view_projection_matrix.inverted()
 
-class TutRaytracerRenderEngine(bpy.types.RenderEngine):
+class TutRTEngine(bpy.types.RenderEngine):
     # These three members are used by blender to set up the
     # RenderEngine; define its internal name, visible name and capabilities.
     bl_idname = "TUTRT"
@@ -165,11 +171,15 @@ class TutRaytracerRenderEngine(bpy.types.RenderEngine):
         self.scene = Scene()
 
         for instance in depsgraph.object_instances:
-            object = instance.object
-            if object.original.get("tutrt_type", "None") == "sphere":
-                sphere = Sphere(instance.matrix_world.copy())
-                print(instance.matrix_world)
-                self.scene.spheres.append(sphere)
+            object = instance.object.original
+            tutrt_type = object.get("tutrt_type", "None")
+
+            if object.type == "LIGHT":
+                self.scene.point_lights.append(PointLight(object.location.copy(), object.data.energy * object.data.color))
+            elif tutrt_type == "SPHERE":
+                self.scene.spheres.append(Sphere(instance.matrix_world.copy()))
+            elif tutrt_type == "PLANE":
+                self.scene.planes.append(Plane(instance.matrix_world.copy()))
 
         rt.render(image, self.camera, self.scene)
         #print(image.buffer)
@@ -208,35 +218,19 @@ class CustomDrawData:
     def draw(self):
         draw_texture_2d(self.texture, (0, self.texture.height), self.texture.width, -self.texture.height)
 
-
-# RenderEngines also need to tell UI Panels that they are compatible with.
-# We recommend to enable all panels marked as BLENDER_RENDER, and then
-# exclude any panels that are replaced by custom panels registered by the
-# render engine, or that are not supported.
-def get_panels():
-    exclude_panels = {
-        'VIEWLAYER_PT_filter',
-        'VIEWLAYER_PT_layer_passes',
-    }
-
-    panels = []
-    for panel in bpy.types.Panel.__subclasses__():
-        if hasattr(panel, 'COMPAT_ENGINES') and 'BLENDER_RENDER' in panel.COMPAT_ENGINES:
-            if panel.__name__ not in exclude_panels:
-                panels.append(panel)
-
-    return panels
-
-class OBJECT_OT_add_sphere(bpy.types.Operator):
-    bl_idname = "mesh.add_tutrt_sphere"
-    bl_label = "Sphere"
+class OBJECT_OT_add(bpy.types.Operator):
+    bl_idname = "mesh.add_tutrt_object"
+    bl_label = "Add TutRT object"
     bl_options = {"REGISTER", "UNDO"}
+    type: bpy.props.StringProperty(name="type", default="sphere")
 
     def execute(self, context):
-        bpy.ops.mesh.primitive_uv_sphere_add()
+        if self.type == "SPHERE":
+            bpy.ops.mesh.primitive_uv_sphere_add()
+        elif self.type == "PLANE":
+            bpy.ops.mesh.primitive_plane_add()
 
-        sphere = context.object
-        sphere["tutrt_type"] = "sphere"
+        context.object["tutrt_type"] = self.type
 
         return {"FINISHED"}
 
@@ -247,30 +241,44 @@ class VIEW3D_MT_tutrt_add(bpy.types.Menu):
     def draw(self, context):
         layout = self.layout
 
-        layout.operator(OBJECT_OT_add_sphere.bl_idname)
+        layout.operator(OBJECT_OT_add.bl_idname, text="Sphere").type = "SPHERE"
+        layout.operator(OBJECT_OT_add.bl_idname, text="Plane").type = "PLANE"
 
 def add_objects_submenu(self, context):
     self.layout.menu(VIEW3D_MT_tutrt_add.bl_idname)
 
+class DATA_PT_light(bpy.types.Panel):
+    bl_label = "Light"
+    bl_space_type = "PROPERTIES"
+    bl_region_type = "WINDOW"
+    bl_context = "data"
+
+    @classmethod
+    def poll(cls, context):
+        return context.light and context.engine == TutRTEngine.bl_idname
+
+    def draw(self, context):
+        layout = self.layout
+
+        light = context.light
+
+        layout.row().prop(light, "type")
+        layout.row().prop(light, "energy")
+        layout.row().prop(light, "color")
+
 def register():
-    # Register the RenderEngine
-    bpy.utils.register_class(TutRaytracerRenderEngine)
-    bpy.utils.register_class(OBJECT_OT_add_sphere)
+    bpy.utils.register_class(TutRTEngine)
+    bpy.utils.register_class(OBJECT_OT_add)
     bpy.utils.register_class(VIEW3D_MT_tutrt_add)
+    bpy.utils.register_class(DATA_PT_light)
 
     bpy.types.VIEW3D_MT_add.prepend(add_objects_submenu)
 
-    for panel in get_panels():
-        panel.COMPAT_ENGINES.add('CUSTOM')
-
 
 def unregister():
-    bpy.utils.unregister_class(TutRaytracerRenderEngine)
-    bpy.utils.unregister_class(OBJECT_OT_add_sphere)
+    bpy.utils.unregister_class(DATA_PT_light)
     bpy.utils.unregister_class(VIEW3D_MT_tutrt_add)
+    bpy.utils.unregister_class(OBJECT_OT_add)
+    bpy.utils.unregister_class(TutRTEngine)
 
     bpy.types.VIEW3D_MT_add.remove(add_objects_submenu)
-
-    for panel in get_panels():
-        if 'CUSTOM' in panel.COMPAT_ENGINES:
-            panel.COMPAT_ENGINES.remove('CUSTOM')
